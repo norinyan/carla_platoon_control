@@ -1,0 +1,100 @@
+{
+    "objects": [
+        {
+            "type": "vehicle.lincoln.mkz_2020",
+            "id": "vehicle_0",
+            "spawn_point": {
+                "x": 45.12,
+                "y": 170.54,
+                "z": 0.6,
+                "roll": 0.0,
+                "pitch": 0.0,
+                "yaw": 0.326
+            },
+            "sensors": [
+                {
+                    "type": "sensor.other.gnss",
+                    "id": "gnss_vehicle_0",
+                    "spawn_point": {"x": 1.0, "y": 0.0, "z": 2.0},
+                    "noise_alt_stddev": 0.0,
+                    "noise_lat_stddev": 0.0,
+                    "noise_lon_stddev": 0.0
+                },
+                {
+                    "type": "sensor.other.imu",
+                    "id": "imu_vehicle_0",
+                    "spawn_point": {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+                    "noise_accel_stddev_x": 0.0,
+                    "noise_accel_stddev_y": 0.0,
+                    "noise_accel_stddev_z": 0.0
+                },
+                {"type": "sensor.pseudo.odom", "id": "odometry_vehicle_0"},
+                {"type": "sensor.pseudo.speedometer", "id": "speedometer_vehicle_0"}
+            ]
+        },
+        {
+            "type": "vehicle.lincoln.mkz_2020",
+            "id": "vehicle_1",
+            "spawn_point": {
+                "x": 35.12,
+                "y": 170.54,
+                "z": 0.6,
+                "roll": 0.0,
+                "pitch": 0.0,
+                "yaw": 0.326
+            },
+            "sensors": [
+                {
+                    "type": "sensor.other.gnss",
+                    "id": "gnss_vehicle_1",
+                    "spawn_point": {"x": 1.0, "y": 0.0, "z": 2.0},
+                    "noise_alt_stddev": 0.0,
+                    "noise_lat_stddev": 0.0,
+                    "noise_lon_stddev": 0.0
+                },
+                {
+                    "type": "sensor.other.imu",
+                    "id": "imu_vehicle_1",
+                    "spawn_point": {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+                    "noise_accel_stddev_x": 0.0,
+                    "noise_accel_stddev_y": 0.0,
+                    "noise_accel_stddev_z": 0.0
+                },
+                {"type": "sensor.pseudo.odom", "id": "odometry_vehicle_1"},
+                {"type": "sensor.pseudo.speedometer", "id": "speedometer_vehicle_1"}
+            ]
+        },
+        {
+            "type": "vehicle.lincoln.mkz_2020",
+            "id": "vehicle_2",
+            "spawn_point": {
+                "x": 25.12,
+                "y": 170.54,
+                "z": 0.6,
+                "roll": 0.0,
+                "pitch": 0.0,
+                "yaw": 0.326
+            },
+            "sensors": [
+                {
+                    "type": "sensor.other.gnss",
+                    "id": "gnss_vehicle_2",
+                    "spawn_point": {"x": 1.0, "y": 0.0, "z": 2.0},
+                    "noise_alt_stddev": 0.0,
+                    "noise_lat_stddev": 0.0,
+                    "noise_lon_stddev": 0.0
+                },
+                {
+                    "type": "sensor.other.imu",
+                    "id": "imu_vehicle_2",
+                    "spawn_point": {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+                    "noise_accel_stddev_x": 0.0,
+                    "noise_accel_stddev_y": 0.0,
+                    "noise_accel_stddev_z": 0.0
+                },
+                {"type": "sensor.pseudo.odom", "id": "odometry_vehicle_2"},
+                {"type": "sensor.pseudo.speedometer", "id": "speedometer_vehicle_2"}
+            ]
+        }
+    ]
+}

@@ -1,0 +1,29 @@
+
+# 横向 LQR 控制器
+lat_lqr:
+  wheelbase: 2.85
+  max_steer_deg: 35.0
+  # Riccati 迭代参数
+  max_iter: 100       # 最大迭代次数
+  eps: 0.0001         # 收敛阈值
+  # 状态代价权重（Q 矩阵对角元素）
+  q_ey: 4.0           # 横向偏差惩罚，越大越积极消除横向误差
+  q_eyaw: 2.0         # 航向偏差惩罚，越大越积极对齐航向
+  # 控制代价权重（R 矩阵）
+  r_delta: 1.0        # 转角幅值惩罚，越大转角越保守
+
+
+lon_mpc_leader:
+  N: 10
+  q_ev: 5.0
+  R_a: 0.1
+  a_min: -3.0
+  a_max: 1.5
+
+lon_mpc_follower:
+  N: 10
+  q_es: 1.5
+  q_ev: 0.8
+  R_a: 0.75
+  a_min: -3.0
+  a_max: 1.5

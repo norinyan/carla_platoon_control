@@ -1,0 +1,22 @@
+vehicles:
+  vehicle_0:
+    name: "vehicle_0"
+    blueprint: "vehicle.lincoln.mkz_2020"
+    color: "255,255,255"
+  vehicle_1:
+    name: "vehicle_1"
+    blueprint: "vehicle.lincoln.mkz_2020"
+    color: "255,0,0"
+  vehicle_2:
+    name: "vehicle_2"
+    blueprint: "vehicle.lincoln.mkz_2020"
+    color: "0,0,255"
+
+route:
+  default: "A"
+  csv_dir: "config"
+
+scene:
+  map: "Town04"
+  weather: "ClearNoon"
+  fixed_delta_seconds: 0.1

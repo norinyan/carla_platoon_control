@@ -4,12 +4,16 @@
   <name>carla_platoon_control</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="norin_ubuntu">nor</maintainer>
+  <maintainer email="nor@todo.todo">nor</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>carla_msgs</depend>
+  <depend>ament_index_python</depend>
+  <depend>python3-yaml</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
