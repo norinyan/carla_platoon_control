@@ -1,0 +1,1 @@
+t,vehicle_id,speed_now,speed_ref,yaw_now,yaw_ref,yaw_err_deg,steer,accel,traj_x,traj_y,s,gap,desired_gap,throttle,brake

@@ -426,7 +426,7 @@ class PlatoonControlNode(Node):
         if self.spectator is None:
             return
 
-        leader = self.vehicles["vehicle_0"].state
+        leader = self.vehicles["vehicle_1"].state
         self.spectator.set_transform(carla.Transform(
             carla.Location(x=leader["x"], y=-leader["y"], z=50),
             carla.Rotation(pitch=-90, yaw=0, roll=0),
