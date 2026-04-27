@@ -178,6 +178,7 @@ class PlatoonControlNode(Node):
         # timer
         self.timer = self.create_timer(self.ctrl_period, self._on_timer)
 
+
     def _on_timer(self):
         # 1. 参考轨迹检查
         if len(self.ref_traj) == 0:
@@ -195,101 +196,93 @@ class PlatoonControlNode(Node):
             )
             return
 
-        # 3. 取三辆车状态
+        # 3. WAITING：等待启动信号，三车保持刹车
+        if self.tracker_state == self.STATE_WAITING:
+            self._pub_all_hold()
+            self.get_logger().info(
+                "等待启动信号 /carla_platoon/start ...",
+                throttle_duration_sec=3.0,
+            )
+            return
+
+        # 4. DRIVING：正常行驶，同时检查是否需要停车
+        if self.tracker_state == self.STATE_DRIVING:
+            if self._is_ready_to_stop():
+                self.tracker_state = self.STATE_STOPPING
+                self.get_logger().info("state: DRIVING -> STOPPING")
+                self._handle_stopping()
+                return
+
+        # 5. STOPPING：三车统一刹车
+        if self.tracker_state == self.STATE_STOPPING:
+            self._handle_stopping()
+            return
+
+        # 6. STOPPED：停稳后保持刹车
+        if self.tracker_state == self.STATE_STOPPED:
+            self._pub_all_hold()
+            self.get_logger().info(
+                "state=STOPPED，保持刹车",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        # 7. 取三辆车状态
         state_0 = self.vehicle_states["vehicle_0"]
         state_1 = self.vehicle_states["vehicle_1"]
         state_2 = self.vehicle_states["vehicle_2"]
 
-        # 4. WAITING：等待启动，持续发布刹车
-        if self.tracker_state == self.STATE_WAITING:
-            ctrl_cmd_0 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-            ctrl_cmd_1 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-            ctrl_cmd_2 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
+        # 8. 三辆车各自找参考点
+        ref_points_0 = self._find_ref_points("vehicle_0")
+        ref_points_1 = self._find_ref_points("vehicle_1")
+        ref_points_2 = self._find_ref_points("vehicle_2")
 
-        # 5. DRIVING：正常控制
-        elif self.tracker_state == self.STATE_DRIVING:
-            if self._is_ready_to_stop():
-                self.tracker_state = self.STATE_STOPPING
-                self.get_logger().info("state: DRIVING -> STOPPING")
+        # 9. 横向控制
+        steer_0 = self.lat_ctrl_0.compute(state_0, ref_points_0, self.ctrl_period)
+        steer_1 = self.lat_ctrl_1.compute(state_1, ref_points_1, self.ctrl_period)
+        steer_2 = self.lat_ctrl_2.compute(state_2, ref_points_2, self.ctrl_period)
 
-                ctrl_cmd_0 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-                ctrl_cmd_1 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-                ctrl_cmd_2 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
+        # 10. 纵向控制
+        accel_0 = self.leader_lon_ctrl.compute(
+            state_0,
+            ref_points_0,
+            self.ctrl_period,
+        )
 
-            else:
-                ref_points_0 = self._find_ref_points("vehicle_0")
-                ref_points_1 = self._find_ref_points("vehicle_1")
-                ref_points_2 = self._find_ref_points("vehicle_2")
+        accel_1 = self.follower_lon_ctrl_1.compute(
+            state_1,
+            ref_points_1,
+            state_0,
+            0.0,
+            self.ctrl_period,
+        )
 
-                steer_0 = self.lat_ctrl_0.compute(state_0, ref_points_0, self.ctrl_period)
-                steer_1 = self.lat_ctrl_1.compute(state_1, ref_points_1, self.ctrl_period)
-                steer_2 = self.lat_ctrl_2.compute(state_2, ref_points_2, self.ctrl_period)
+        accel_2 = self.follower_lon_ctrl_2.compute(
+            state_2,
+            ref_points_2,
+            state_1,
+            0.0,
+            self.ctrl_period,
+        )
 
-                accel_0 = self.leader_lon_ctrl.compute(
-                    state_0,
-                    ref_points_0,
-                    self.ctrl_period,
-                )
+        # 11. a_cmd + steer 映射为 throttle / brake / steer
+        ctrl_cmd_0 = self._map2cmd(accel_0, steer_0, state_0)
+        ctrl_cmd_1 = self._map2cmd(accel_1, steer_1, state_1)
+        ctrl_cmd_2 = self._map2cmd(accel_2, steer_2, state_2)
 
-                accel_1 = self.follower_lon_ctrl_1.compute(
-                    state_1,
-                    ref_points_1,
-                    state_0,
-                    0.0,
-                    self.ctrl_period,
-                )
-
-                accel_2 = self.follower_lon_ctrl_2.compute(
-                    state_2,
-                    ref_points_2,
-                    state_1,
-                    0.0,
-                    self.ctrl_period,
-                )
-
-                ctrl_cmd_0 = self._map2cmd(accel_0, steer_0, state_0)
-                ctrl_cmd_1 = self._map2cmd(accel_1, steer_1, state_1)
-                ctrl_cmd_2 = self._map2cmd(accel_2, steer_2, state_2)
-
-        # 6. STOPPING：持续发布停车命令
-        elif self.tracker_state == self.STATE_STOPPING:
-            ctrl_cmd_0 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-            ctrl_cmd_1 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-            ctrl_cmd_2 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-
-            max_speed = max(
-                state_0["speed"],
-                state_1["speed"],
-                state_2["speed"],
-            )
-
-            if max_speed < self.stop_speed:
-                self.tracker_state = self.STATE_STOPPED
-                self.get_logger().info("state: STOPPING -> STOPPED")
-
-        # 7. STOPPED：持续保持刹车
-        elif self.tracker_state == self.STATE_STOPPED:
-            ctrl_cmd_0 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-            ctrl_cmd_1 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-            ctrl_cmd_2 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-
-        # 8. 未知状态：安全停车
-        else:
-            ctrl_cmd_0 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-            ctrl_cmd_1 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-            ctrl_cmd_2 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
-
-        # 9. 不管什么状态，最后都发布
+        # 12. 发布三车控制命令
         self._pub_cmd("vehicle_0", ctrl_cmd_0)
         self._pub_cmd("vehicle_1", ctrl_cmd_1)
         self._pub_cmd("vehicle_2", ctrl_cmd_2)
 
         self.get_logger().info(
-            f"state={self.tracker_state}, "
+            f"state=DRIVING, "
             f"v0={state_0['speed']:.2f}, "
             f"v1={state_1['speed']:.2f}, "
             f"v2={state_2['speed']:.2f}, "
-            f"cmd0=({ctrl_cmd_0['throttle']:.2f}, {ctrl_cmd_0['brake']:.2f}, {ctrl_cmd_0['steer']:.2f})",
+            f"a0={accel_0:.2f}, "
+            f"a1={accel_1:.2f}, "
+            f"a2={accel_2:.2f}",
             throttle_duration_sec=1.0,
         )
 

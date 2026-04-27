@@ -1,31 +1,48 @@
 from abc import ABC, abstractmethod
 
 
-class PlatoonController(ABC):
-    """
-    编队控制器基类，横纵向控制合并在一个接口中。
-    """
-
+class LateralController(ABC):
     @abstractmethod
-    def compute(
-        self,
-        ego_state: dict,
-        ref_point: list,
-        leader_state: dict,
-        desired_gap: float,
-        dt: float,
-    ) -> tuple:
+    def compute(self, vehicle_state, ref_points, dt):
         """
-        ego_state:    本车状态，{x, y, yaw, speed}
-        ref_point:    参考轨迹点列表，从当前最近点往前N个点，
-                      每个点格式 {x, y, yaw, kappa, speed, s}
-        leader_state: 前车状态，{x, y, yaw, speed}
-                      领航车(vehicle_0)的 leader_state 传 None
-        desired_gap:  期望跟车间距(米)
-        dt:           控制周期(秒)
+        横向控制器接口
 
-        return: (steer, a_cmd)
-            steer:  方向盘控制量，范围 [-1.0, 1.0]
-            a_cmd:  纵向加速度指令 (m/s^2)
+        vehicle_state: 当前车辆状态，包含 x, y, yaw, speed
+        ref_points: 参考轨迹点列表，每个点包含 x, y, yaw, kappa, speed, s
+        dt: 控制周期，单位秒
+
+        return: steer，范围 [-1.0, 1.0]
         """
-        pass
+        raise NotImplementedError
+
+
+class LeaderLonController(ABC):
+    @abstractmethod
+    def compute(self, vehicle_state, ref_points, dt):
+        """
+        领航车纵向控制器接口
+
+        vehicle_state: 当前车辆状态，包含 x, y, yaw, speed, s
+        ref_points: 参考轨迹点列表，每个点包含 x, y, yaw, kappa, speed, s
+        dt: 控制周期，单位秒
+
+        return: a_cmd，单位 m/s^2
+        """
+        raise NotImplementedError
+
+
+class FollowerLonController(ABC):
+    @abstractmethod
+    def compute(self, vehicle_state, ref_points, front_state, desired_gap, dt):
+        """
+        跟随车纵向控制器接口
+
+        vehicle_state: 当前车辆状态，包含 x, y, yaw, speed, s
+        ref_points: 参考轨迹点列表，每个点包含 x, y, yaw, kappa, speed, s
+        front_state: 前车状态，包含 x, y, yaw, speed, s，可以额外包含 accel
+        desired_gap: 期望跟车净间距，单位米
+        dt: 控制周期，单位秒
+
+        return: a_cmd，单位 m/s^2
+        """
+        raise NotImplementedError
