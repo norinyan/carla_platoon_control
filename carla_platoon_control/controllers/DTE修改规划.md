@@ -382,3 +382,487 @@ debug_info = {
 6. a_cmd 能通过现有 _map2cmd() 转成 throttle / brake。
 ```
 
+## 10. 第三步 FollowerLonMPC 实现细化
+
+第三步只修改：
+
+```text
+carla_platoon_control/controllers/platoon_controller.py
+```
+
+不修改：
+
+```text
+platoon_node.py
+base_controller.py
+controller_params.yaml
+visualizer.py
+```
+
+目标：
+
+```text
+先实现 DTH + 自适应 TubeMPC 的每周期求解版本。
+事件触发的序列复用逻辑留到第四步。
+```
+
+因此第三步中：
+
+```text
+triggered 固定为 True
+trigger_error_norm 固定为 0.0
+每个控制周期都重新求解一次 QP
+```
+
+### 10.1 代码结构
+
+`FollowerLonMPC` 按模板 `lat_mpc.py` 的风格组织为：
+
+```text
+1. __init__()
+2. compute()
+3. _compute_error()
+4. _compute_tube_radius()
+5. _solve_mpc()
+6. _build_model()
+7. _setup_mpc()
+```
+
+注释风格沿用现有代码：
+
+```text
+# 1. 计算误差状态
+# 2. 求解MPC输出
+# 3. 更新历史
+```
+
+不新增复杂抽象，不拆分新文件。
+
+### 10.2 __init__()
+
+读取参数：
+
+```text
+N, dt
+
+h0, gamma, h_min, h_max, d0
+
+q_s, q_v, r_u, r_du
+
+a_min, a_max
+v_min, v_max
+gap_min, gap_max
+
+omega_s0, omega_v0
+beta_s, beta_v
+omega_s_min, omega_s_max
+omega_v_min, omega_v_max
+
+k_s, k_v
+
+sigma, tau_thresh
+```
+
+内部矩阵：
+
+```python
+self.Q = np.diag([q_s, q_v])
+self.R_u = r_u
+self.R_du = r_du
+self.K = np.array([k_s, k_v])
+```
+
+历史量：
+
+```python
+self.u_prev = 0.0
+self.u_bar_seq_last = None
+self.x_bar_seq_last = None
+self.trigger_hold_index = 1
+```
+
+说明：
+
+```text
+事件触发相关历史量第三步先初始化但不使用。
+第四步再接入序列复用。
+```
+
+最后调用：
+
+```python
+self._setup_mpc()
+```
+
+### 10.3 compute()
+
+接口：
+
+```python
+def compute(self, vehicle_state, ref_points, front_state, tau, dt):
+```
+
+主流程：
+
+```text
+1. 保存当前输入到 self
+2. 计算误差状态
+3. 计算 Tube 半径
+4. 求解 MPC
+5. Tube 反馈修正
+6. 更新 u_prev
+7. 返回 a_cmd, debug_info
+```
+
+保存输入：
+
+```python
+self.dt = dt
+self.vehicle_state = vehicle_state
+self.ref_points = ref_points
+self.front_state = front_state
+self.tau = tau
+```
+
+不修改原始输入字典：
+
+```text
+compute() 内部只读取 vehicle_state 和 front_state。
+不向两个字典写入新字段。
+```
+
+### 10.4 _compute_error()
+
+计算 DTH：
+
+```python
+h = np.clip(self.h0 + self.gamma * self.tau, self.h_min, self.h_max)
+desired_gap = h * self.vehicle_state["speed"] + self.d0
+```
+
+计算误差：
+
+```python
+gap = self.front_state["s"] - self.vehicle_state["s"]
+e_s = gap - desired_gap
+e_v = self.front_state["speed"] - self.vehicle_state["speed"]
+x = np.array([e_s, e_v])
+```
+
+返回：
+
+```python
+return x, h, desired_gap, gap, e_s, e_v
+```
+
+要求：
+
+```text
+gap 使用路径坐标 s。
+front_state["s"] 和 vehicle_state["s"] 必须来自同一条参考轨迹。
+```
+
+### 10.5 _compute_tube_radius()
+
+计算：
+
+```python
+omega_s = np.clip(
+    self.omega_s0 + self.beta_s * self.tau,
+    self.omega_s_min,
+    self.omega_s_max,
+)
+
+omega_v = np.clip(
+    self.omega_v0 + self.beta_v * self.tau,
+    self.omega_v_min,
+    self.omega_v_max,
+)
+```
+
+返回：
+
+```python
+return omega_s, omega_v
+```
+
+含义：
+
+```text
+tau 增大 -> omega_s / omega_v 增大 -> 收紧约束更保守
+tau 减小 -> omega_s / omega_v 减小 -> 收紧约束更宽松
+```
+
+### 10.6 _build_model()
+
+MVP 使用二阶误差模型：
+
+```python
+A = np.array([
+    [1.0, self.dt],
+    [0.0, 1.0],
+])
+
+B = np.array([
+    [0.0],
+    [-self.dt],
+])
+```
+
+第三步中：
+
+```text
+a_front = 0
+E a_front 暂不进入模型
+```
+
+返回：
+
+```python
+return A, B
+```
+
+### 10.7 _setup_mpc()
+
+变量：
+
+```python
+self.x_var = cp.Variable((2, self.N + 1))
+self.u_var = cp.Variable((1, self.N))
+```
+
+参数：
+
+```python
+self.x0_param = cp.Parameter(2)
+self.A_param = cp.Parameter((2, 2))
+self.B_param = cp.Parameter((2, 1))
+self.u_prev_param = cp.Parameter()
+self.desired_gap_param = cp.Parameter(nonneg=True)
+self.front_speed_param = cp.Parameter(nonneg=True)
+self.omega_s_param = cp.Parameter(nonneg=True)
+self.omega_v_param = cp.Parameter(nonneg=True)
+```
+
+初始约束：
+
+```python
+constraints = [self.x_var[:, 0] == self.x0_param]
+```
+
+每个预测步：
+
+```python
+u_ref = self.u_prev_param if k == 0 else self.u_var[0, k - 1]
+du = self.u_var[0, k] - u_ref
+
+gap_bar = self.x_var[0, k] + self.desired_gap_param
+v_ego_bar = self.front_speed_param - self.x_var[1, k]
+```
+
+代价：
+
+```python
+cost += cp.quad_form(self.x_var[:, k], self.Q)
+cost += self.R_u * cp.square(self.u_var[0, k])
+cost += self.R_du * cp.square(du)
+```
+
+动力学约束：
+
+```python
+constraints += [
+    self.x_var[:, k + 1] ==
+    self.A_param @ self.x_var[:, k] + self.B_param @ self.u_var[:, k]
+]
+```
+
+控制约束：
+
+```python
+constraints += [
+    self.u_var[0, k] >= self.a_min,
+    self.u_var[0, k] <= self.a_max,
+]
+```
+
+收紧间距约束：
+
+```python
+constraints += [
+    gap_bar >= self.gap_min + self.omega_s_param,
+    gap_bar <= self.gap_max - self.omega_s_param,
+]
+```
+
+收紧速度约束：
+
+```python
+constraints += [
+    v_ego_bar >= self.v_min + self.omega_v_param,
+    v_ego_bar <= self.v_max - self.omega_v_param,
+]
+```
+
+终端代价：
+
+```python
+cost += cp.quad_form(self.x_var[:, self.N], self.Q)
+```
+
+构建问题：
+
+```python
+self.mpc_problem = cp.Problem(cp.Minimize(cost), constraints)
+```
+
+### 10.8 _solve_mpc()
+
+输入：
+
+```python
+def _solve_mpc(self, x0, desired_gap, omega_s, omega_v):
+```
+
+更新参数：
+
+```python
+A, B = self._build_model()
+
+self.x0_param.value = x0
+self.A_param.value = A
+self.B_param.value = B
+self.u_prev_param.value = self.u_prev
+self.desired_gap_param.value = desired_gap
+self.front_speed_param.value = self.front_state["speed"]
+self.omega_s_param.value = omega_s
+self.omega_v_param.value = omega_v
+```
+
+求解：
+
+```python
+try:
+    self.mpc_problem.solve(solver=cp.OSQP, warm_start=True, verbose=False)
+except cp.error.SolverError:
+    print("[FollowerLonMPC] 求解异常，保持上一帧")
+    return self._fallback_seq(x0)
+```
+
+保底：
+
+```python
+if self.u_var.value is None or self.x_var.value is None:
+    print("[FollowerLonMPC] 求解失败，保持上一帧")
+    return self._fallback_seq(x0)
+```
+
+成功返回：
+
+```python
+u_bar_seq = np.array(self.u_var.value).reshape(-1)
+x_bar_seq = np.array(self.x_var.value).T
+return u_bar_seq, x_bar_seq
+```
+
+### 10.9 求解失败回退
+
+第三步可以增加一个私有函数：
+
+```python
+def _fallback_seq(self, x0):
+```
+
+含义：
+
+```text
+QP 不可行或求解异常时，使用上一周期实际输出 u_prev 生成保底控制序列。
+```
+
+实现：
+
+```python
+u_safe = np.clip(self.u_prev, self.a_min, self.a_max)
+u_bar_seq = np.full(self.N, u_safe)
+x_bar_seq = np.tile(x0, (self.N + 1, 1))
+return u_bar_seq, x_bar_seq
+```
+
+说明：
+
+```text
+这是最小保底逻辑，不做复杂安全策略。
+```
+
+### 10.10 Tube 反馈修正
+
+MPC 求解后：
+
+```python
+u_bar_0 = u_bar_seq[0]
+x_bar_0 = x_bar_seq[0]
+z0 = x - x_bar_0
+u_feedback = float(self.K @ z0)
+```
+
+输出：
+
+```python
+a_cmd = u_bar_0 + u_feedback
+a_cmd = np.clip(a_cmd, self.a_min, self.a_max)
+```
+
+更新：
+
+```python
+self.u_prev = a_cmd
+```
+
+### 10.11 debug_info
+
+第三步返回：
+
+```python
+debug_info = {
+    "tau": tau,
+    "h": h,
+    "desired_gap": desired_gap,
+    "gap": gap,
+    "e_s": e_s,
+    "e_v": e_v,
+    "omega_s": omega_s,
+    "omega_v": omega_v,
+    "triggered": True,
+    "trigger_error_norm": 0.0,
+    "u_bar": u_bar_0,
+    "u_feedback": u_feedback,
+    "a_cmd": a_cmd,
+}
+```
+
+说明：
+
+```text
+triggered 第三步固定为 True。
+第四步接入事件触发后再变为真实值。
+```
+
+### 10.12 第三步验收
+
+只做 controller 单元级验收，不启动 ROS 节点：
+
+```text
+1. platoon_controller.py 语法检查通过。
+2. FollowerLonMPC 可以实例化。
+3. compute() 返回 (float, dict)。
+4. tau=0.10 时 desired_gap > tau=0.01。
+5. tau=0.10 时 omega_s / omega_v > tau=0.01。
+6. a_cmd 在 [a_min, a_max] 内。
+```
+
+注意：
+
+```text
+第三步完成后 platoon_node.py 仍未适配新返回值。
+因此第三步后不要直接运行完整 ROS 控制节点。
+```

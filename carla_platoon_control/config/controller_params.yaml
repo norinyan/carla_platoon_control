@@ -16,4 +16,50 @@ leader_lon_pid:
   a_limit: 1.5
   i_limit: 1.0
 
-follower_lon_mpc: {}
+follower_lon_mpc:
+  # MPC prediction horizon and nominal sampling time.
+  N: 10
+  dt: 0.1
+
+  # Dynamic time headway (DTH): h = clip(h0 + gamma * tau, h_min, h_max).
+  h0: 1.0
+  gamma: 3.3
+  h_min: 0.6
+  h_max: 1.5
+  # Standstill safety distance in desired_gap = h * v_ego + d0.
+  d0: 5.0
+
+  # MPC cost weights for spacing error, relative-speed error, acceleration,
+  # and acceleration increment.
+  q_s: 4.0
+  q_v: 1.0
+  r_u: 0.2
+  r_du: 0.5
+
+  # Physical and tightened nominal constraints.
+  a_min: -2.0
+  a_max: 1.5
+  v_min: 0.0
+  v_max: 8.0
+  # Use paper-level safety distance for MVP validation.
+  gap_min: 5.0
+  gap_max: 30.0
+
+  # Delay-adaptive Tube radius:
+  # omega = clip(omega0 + beta * tau, omega_min, omega_max).
+  omega_s0: 0.5
+  omega_v0: 0.2
+  beta_s: 3.0
+  beta_v: 1.0
+  omega_s_min: 0.3
+  omega_s_max: 3.0
+  omega_v_min: 0.1
+  omega_v_max: 1.5
+
+  # Tube feedback gain K = [k_s, k_v].
+  k_s: 0.2
+  k_v: 0.6
+
+  # Event trigger thresholds: Tube normalized error and communication delay.
+  sigma: 0.8
+  tau_thresh: 0.07
