@@ -20,6 +20,7 @@ ros2 topic pub --once /carla_platoon/start std_msgs/Bool "data: true"
 import os
 import csv
 import math
+import random
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
@@ -179,6 +180,9 @@ class PlatoonControlNode(Node):
         self.timer = self.create_timer(self.ctrl_period, self._on_timer)
 
     def _on_timer(self):
+        info_1 = None
+        info_2 = None
+
         # 1. 参考轨迹检查
         if len(self.ref_traj) == 0:
             return
@@ -231,19 +235,22 @@ class PlatoonControlNode(Node):
                     self.ctrl_period,
                 )
 
-                accel_1 = self.follower_lon_ctrl_1.compute(
+                tau_01 = self._get_v2x_delay("vehicle_0", "vehicle_1")
+                tau_12 = self._get_v2x_delay("vehicle_1", "vehicle_2")
+
+                accel_1, info_1 = self.follower_lon_ctrl_1.compute(
                     state_1,
                     ref_points_1,
                     state_0,
-                    0.0,
+                    tau_01,
                     self.ctrl_period,
                 )
 
-                accel_2 = self.follower_lon_ctrl_2.compute(
+                accel_2, info_2 = self.follower_lon_ctrl_2.compute(
                     state_2,
                     ref_points_2,
                     state_1,
-                    0.0,
+                    tau_12,
                     self.ctrl_period,
                 )
 
@@ -289,7 +296,9 @@ class PlatoonControlNode(Node):
             f"v0={state_0['speed']:.2f}, "
             f"v1={state_1['speed']:.2f}, "
             f"v2={state_2['speed']:.2f}, "
-            f"cmd0=({ctrl_cmd_0['throttle']:.2f}, {ctrl_cmd_0['brake']:.2f}, {ctrl_cmd_0['steer']:.2f})",
+            f"cmd0=({ctrl_cmd_0['throttle']:.2f}, {ctrl_cmd_0['brake']:.2f}, {ctrl_cmd_0['steer']:.2f}), "
+            f"f1={self._format_follower_info(info_1)}, "
+            f"f2={self._format_follower_info(info_2)}",
             throttle_duration_sec=1.0,
         )
 
@@ -321,6 +330,21 @@ class PlatoonControlNode(Node):
             self.tracker_state = self.STATE_DRIVING
             self.leader_lon_ctrl.reset()
             self.get_logger().info("收到启动信号，三车开始控制")
+
+    def _get_v2x_delay(self, front_id, rear_id):
+        return random.uniform(0.01, 0.10)
+
+    def _format_follower_info(self, info):
+        if info is None:
+            return "none"
+
+        return (
+            f"tau={info['tau']:.3f}, "
+            f"gap={info['gap']:.2f}, "
+            f"des={info['desired_gap']:.2f}, "
+            f"trig={info['triggered']}, "
+            f"a={info['a_cmd']:.2f}"
+        )
 
     def _dist_to_goal(self, vehicle_id):
         """计算某辆车到终点的直线距离。"""
