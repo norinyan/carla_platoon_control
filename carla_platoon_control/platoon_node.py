@@ -7,21 +7,27 @@ carla
 终端2：生成编队场景
 ros2 launch carla_platoon_control spawn_scene.launch.py route:=A
 
-终端3：启动三车编队控制节点
+终端3：启动三车编队控制节点（会在 src/carla_platoon_control/data/ 下记录实验 CSV）
 ros2 run carla_platoon_control platoon_node --ros-args -p route:=A
 
-终端4：启动可视化
-ros2 run carla_platoon_control visualizer route:=A
+终端4：启动实时可视化（订阅 /carla_platoon/experiment_state，不再负责记录 CSV）
+ros2 run carla_platoon_control visualizer --ros-args --remap route:=A
 
 终端5：发送启动信号
 ros2 topic pub --once /carla_platoon/start std_msgs/Bool "data: true"
+
+离线复盘：读取 platoon_node 记录的 CSV 并生成论文指标图
+ros2 run carla_platoon_control visualizer csv:=/home/nor/ros2_carla_ws/src/carla_platoon_control/data/platoon_control_route_A_YYYYMMDD_HHMMSS.csv --ros-args --remap route:=A
 """
 
 import os
 import csv
+import json
 import math
 import random
 import yaml
+from datetime import datetime
+from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -37,6 +43,7 @@ from carla_platoon_control.controllers.platoon_controller import LeaderLonPID
 from carla_platoon_control.controllers.platoon_controller import FollowerLonMPC
 
 from std_msgs.msg import Bool
+from std_msgs.msg import String
 
 class PlatoonControlNode(Node):
     def __init__(self):
@@ -73,6 +80,12 @@ class PlatoonControlNode(Node):
         self.pub_cmd_2 = self.create_publisher(
             CarlaEgoVehicleControl,
             "/carla/vehicle_2/vehicle_control_cmd",
+            10,
+        )
+
+        self.pub_experiment_state = self.create_publisher(
+            String,
+            "/carla_platoon/experiment_state",
             10,
         )
 
@@ -175,6 +188,7 @@ class PlatoonControlNode(Node):
         self.follower_lon_ctrl_2 = FollowerLonMPC(cfg["follower_lon_mpc"])
 
         self.BRAKE_K = 0.2
+        self._init_experiment_recorder()
 
         # timer
         self.timer = self.create_timer(self.ctrl_period, self._on_timer)
@@ -204,6 +218,14 @@ class PlatoonControlNode(Node):
         state_1 = self.vehicle_states["vehicle_1"]
         state_2 = self.vehicle_states["vehicle_2"]
 
+        ref_points_0 = self._find_ref_points("vehicle_0")
+        ref_points_1 = self._find_ref_points("vehicle_1")
+        ref_points_2 = self._find_ref_points("vehicle_2")
+
+        accel_0 = None
+        accel_1 = None
+        accel_2 = None
+
         # 4. WAITING：等待启动，持续发布刹车
         if self.tracker_state == self.STATE_WAITING:
             ctrl_cmd_0 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
@@ -221,10 +243,6 @@ class PlatoonControlNode(Node):
                 ctrl_cmd_2 = {"throttle": 0.0, "brake": 0.3, "steer": 0.0}
 
             else:
-                ref_points_0 = self._find_ref_points("vehicle_0")
-                ref_points_1 = self._find_ref_points("vehicle_1")
-                ref_points_2 = self._find_ref_points("vehicle_2")
-
                 steer_0 = self.lat_ctrl_0.compute(state_0, ref_points_0, self.ctrl_period)
                 steer_1 = self.lat_ctrl_1.compute(state_1, ref_points_1, self.ctrl_period)
                 steer_2 = self.lat_ctrl_2.compute(state_2, ref_points_2, self.ctrl_period)
@@ -291,12 +309,31 @@ class PlatoonControlNode(Node):
         self._pub_cmd("vehicle_1", ctrl_cmd_1)
         self._pub_cmd("vehicle_2", ctrl_cmd_2)
 
+        row = self._build_experiment_row(
+            state_0,
+            state_1,
+            state_2,
+            ref_points_0,
+            info_1,
+            info_2,
+            accel_0,
+            accel_1,
+            accel_2,
+            ctrl_cmd_0,
+            ctrl_cmd_1,
+            ctrl_cmd_2,
+        )
+        self._write_experiment_row(row)
+        self._publish_experiment_state(row)
+
         self.get_logger().info(
             f"state={self.tracker_state}, "
             f"v0={state_0['speed']:.2f}, "
             f"v1={state_1['speed']:.2f}, "
             f"v2={state_2['speed']:.2f}, "
             f"cmd0=({ctrl_cmd_0['throttle']:.2f}, {ctrl_cmd_0['brake']:.2f}, {ctrl_cmd_0['steer']:.2f}), "
+            f"cmd1=({ctrl_cmd_1['throttle']:.2f}, {ctrl_cmd_1['brake']:.2f}, {ctrl_cmd_1['steer']:.2f}), "
+            f"cmd2=({ctrl_cmd_2['throttle']:.2f}, {ctrl_cmd_2['brake']:.2f}, {ctrl_cmd_2['steer']:.2f}), "
             f"f1={self._format_follower_info(info_1)}, "
             f"f2={self._format_follower_info(info_2)}",
             throttle_duration_sec=1.0,
@@ -342,9 +379,152 @@ class PlatoonControlNode(Node):
             f"tau={info['tau']:.3f}, "
             f"gap={info['gap']:.2f}, "
             f"des={info['desired_gap']:.2f}, "
+            f"e_s={info['e_s']:.2f}, "
+            f"e_v={info['e_v']:.2f}, "
             f"trig={info['triggered']}, "
-            f"a={info['a_cmd']:.2f}"
+            f"a={info['a_cmd']:.2f}, "
+            f"solver={info.get('solver_status', 'na')}"
         )
+
+    def _init_experiment_recorder(self):
+        data_dir = Path("/home/nor/ros2_carla_ws/src/carla_platoon_control/data")
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.csv_path = data_dir / f"platoon_control_route_{self.route}_{ts}.csv"
+        self.csv_fp = self.csv_path.open("w", newline="", encoding="utf-8")
+
+        self.experiment_fields = [
+            "t", "state", "route",
+            "x0", "y0", "yaw0", "v0", "s0",
+            "x1", "y1", "yaw1", "v1", "s1",
+            "x2", "y2", "yaw2", "v2", "s2",
+            "speed_ref0",
+            "gap01", "des01", "es01", "ev01", "tau01", "h1",
+            "omega_s1", "omega_v1", "triggered1",
+            "tube_triggered1", "delay_triggered1", "trigger_norm1",
+            "u_bar1", "u_feedback1", "a1", "solver_status1",
+            "solver_value1", "solve_time_ms1", "fallback_used1",
+            "gap12", "des12", "es12", "ev12", "tau12", "h2",
+            "omega_s2", "omega_v2", "triggered2",
+            "tube_triggered2", "delay_triggered2", "trigger_norm2",
+            "u_bar2", "u_feedback2", "a2", "solver_status2",
+            "solver_value2", "solve_time_ms2", "fallback_used2",
+            "a0",
+            "cmd0_throttle", "cmd0_brake", "cmd0_steer",
+            "cmd1_throttle", "cmd1_brake", "cmd1_steer",
+            "cmd2_throttle", "cmd2_brake", "cmd2_steer",
+        ]
+
+        self.csv_writer = csv.DictWriter(self.csv_fp, fieldnames=self.experiment_fields)
+        self.csv_writer.writeheader()
+        self.csv_fp.flush()
+        self.start_time = self.get_clock().now()
+        self.get_logger().info(f"recording control csv -> {self.csv_path}")
+
+    def _info_value(self, info, key, default=""):
+        if info is None:
+            return default
+        value = info.get(key, default)
+        if isinstance(value, (bool, str)):
+            return value
+        if value is None:
+            return default
+        return float(value)
+
+    def _build_experiment_row(
+        self,
+        state_0,
+        state_1,
+        state_2,
+        ref_points_0,
+        info_1,
+        info_2,
+        accel_0,
+        accel_1,
+        accel_2,
+        ctrl_cmd_0,
+        ctrl_cmd_1,
+        ctrl_cmd_2,
+    ):
+        now = self.get_clock().now()
+        t = (now - self.start_time).nanoseconds * 1e-9
+        speed_ref0 = ref_points_0[0]["speed"] if len(ref_points_0) > 0 else ""
+
+        return {
+            "t": t,
+            "state": self.tracker_state,
+            "route": self.route,
+            "x0": state_0["x"], "y0": state_0["y"], "yaw0": state_0["yaw"],
+            "v0": state_0["speed"], "s0": state_0["s"],
+            "x1": state_1["x"], "y1": state_1["y"], "yaw1": state_1["yaw"],
+            "v1": state_1["speed"], "s1": state_1["s"],
+            "x2": state_2["x"], "y2": state_2["y"], "yaw2": state_2["yaw"],
+            "v2": state_2["speed"], "s2": state_2["s"],
+            "speed_ref0": speed_ref0,
+            "gap01": self._info_value(info_1, "gap"),
+            "des01": self._info_value(info_1, "desired_gap"),
+            "es01": self._info_value(info_1, "e_s"),
+            "ev01": self._info_value(info_1, "e_v"),
+            "tau01": self._info_value(info_1, "tau"),
+            "h1": self._info_value(info_1, "h"),
+            "omega_s1": self._info_value(info_1, "omega_s"),
+            "omega_v1": self._info_value(info_1, "omega_v"),
+            "triggered1": self._info_value(info_1, "triggered"),
+            "tube_triggered1": self._info_value(info_1, "tube_triggered"),
+            "delay_triggered1": self._info_value(info_1, "delay_triggered"),
+            "trigger_norm1": self._info_value(info_1, "trigger_error_norm"),
+            "u_bar1": self._info_value(info_1, "u_bar"),
+            "u_feedback1": self._info_value(info_1, "u_feedback"),
+            "a1": self._info_value(info_1, "a_cmd", "" if accel_1 is None else accel_1),
+            "solver_status1": self._info_value(info_1, "solver_status"),
+            "solver_value1": self._info_value(info_1, "solver_value"),
+            "solve_time_ms1": self._info_value(info_1, "solve_time_ms"),
+            "fallback_used1": self._info_value(info_1, "fallback_used"),
+            "gap12": self._info_value(info_2, "gap"),
+            "des12": self._info_value(info_2, "desired_gap"),
+            "es12": self._info_value(info_2, "e_s"),
+            "ev12": self._info_value(info_2, "e_v"),
+            "tau12": self._info_value(info_2, "tau"),
+            "h2": self._info_value(info_2, "h"),
+            "omega_s2": self._info_value(info_2, "omega_s"),
+            "omega_v2": self._info_value(info_2, "omega_v"),
+            "triggered2": self._info_value(info_2, "triggered"),
+            "tube_triggered2": self._info_value(info_2, "tube_triggered"),
+            "delay_triggered2": self._info_value(info_2, "delay_triggered"),
+            "trigger_norm2": self._info_value(info_2, "trigger_error_norm"),
+            "u_bar2": self._info_value(info_2, "u_bar"),
+            "u_feedback2": self._info_value(info_2, "u_feedback"),
+            "a2": self._info_value(info_2, "a_cmd", "" if accel_2 is None else accel_2),
+            "solver_status2": self._info_value(info_2, "solver_status"),
+            "solver_value2": self._info_value(info_2, "solver_value"),
+            "solve_time_ms2": self._info_value(info_2, "solve_time_ms"),
+            "fallback_used2": self._info_value(info_2, "fallback_used"),
+            "a0": "" if accel_0 is None else accel_0,
+            "cmd0_throttle": ctrl_cmd_0["throttle"],
+            "cmd0_brake": ctrl_cmd_0["brake"],
+            "cmd0_steer": ctrl_cmd_0["steer"],
+            "cmd1_throttle": ctrl_cmd_1["throttle"],
+            "cmd1_brake": ctrl_cmd_1["brake"],
+            "cmd1_steer": ctrl_cmd_1["steer"],
+            "cmd2_throttle": ctrl_cmd_2["throttle"],
+            "cmd2_brake": ctrl_cmd_2["brake"],
+            "cmd2_steer": ctrl_cmd_2["steer"],
+        }
+
+    def _write_experiment_row(self, row):
+        self.csv_writer.writerow(row)
+        self.csv_fp.flush()
+
+    def _publish_experiment_state(self, row):
+        msg = String()
+        msg.data = json.dumps(row, ensure_ascii=True)
+        self.pub_experiment_state.publish(msg)
+
+    def close_experiment_recorder(self):
+        if hasattr(self, "csv_fp") and self.csv_fp and not self.csv_fp.closed:
+            self.csv_fp.flush()
+            self.csv_fp.close()
 
     def _dist_to_goal(self, vehicle_id):
         """计算某辆车到终点的直线距离。"""
@@ -577,6 +757,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     finally:
+        node.close_experiment_recorder()
         node.destroy_node()
         rclpy.shutdown()
         

@@ -1,4 +1,255 @@
-# DTE 编队控制 MVP 修改规划
+# 修改规划 -May11 第二版
+
+## 1. 这个想法可以实现吗，怎么做
+
+可以实现。
+
+做法：不改源码控制逻辑，只做三套参数配置 + 三组实验 CSV 对比。
+
+三套版本：
+
+```text
+V1: Base-NoDelay-NoTrigger
+V2: Base-Delay-NoTrigger
+V3: Proposed-Delay-DTH-AdaptiveTube-Trigger
+```
+
+实验方法：
+
+```text
+1. 每次只换 controller_params.yaml 中 follower_lon_mpc 的参数。
+2. 每个版本跑同一条 route A。
+3. 每个版本记录 platoon_control_route_A_*.csv。
+4. 离线统计 e_s RMSE、e_v RMSE、min gap、trigger rate、solve time、accel saturation。
+5. 用 V1 证明基础控制能跑。
+6. 用 V2 证明加入通信延迟后性能变差。
+7. 用 V3 证明三项设计能恢复或改善性能。
+```
+
+版本命名中的 A/B/C 建议定义为：
+
+```text
+A = Delay Model
+    NoDelay / Delay
+
+B = Spacing + Tube Design
+    FixedCTH-FixedTube / DTH-AdaptiveTube
+
+C = Solver Trigger Mode
+    Periodic / EventTrigger
+```
+
+因此三版命名：
+
+```text
+V1 = NoDelay + FixedCTH-FixedTube + Periodic
+V2 = Delay + FixedCTH-FixedTube + Periodic
+V3 = Delay + DTH-AdaptiveTube + EventTrigger
+```
+
+## 2. 三个版本区别和参数怎么调
+
+### V1: 无通信延迟 Base
+
+目的：
+
+```text
+验证基础编队控制本身可以稳定工作。
+```
+
+配置：
+
+```yaml
+follower_lon_mpc:
+  h0: 1.0
+  gamma: 0.0
+  h_min: 1.0
+  h_max: 1.0
+  d0: 5.0
+
+  omega_s0: 0.5
+  omega_v0: 0.2
+  beta_s: 0.0
+  beta_v: 0.0
+  omega_s_min: 0.5
+  omega_s_max: 0.5
+  omega_v_min: 0.2
+  omega_v_max: 0.2
+
+  sigma: -1.0
+  tau_thresh: 999.0
+```
+
+含义：
+
+```text
+gamma=0       -> 期望间距不随 tau 变化
+beta_s/v=0   -> Tube 半径不随 tau 变化
+sigma=-1     -> 每周期触发，相当于 Periodic MPC
+tau_thresh=999 -> 延迟条件永远不触发
+```
+
+运行时：
+
+```text
+tau 仍可由代码生成，但参数让 tau 不影响控制器。
+```
+
+### V2: 加通信延迟 Base
+
+目的：
+
+```text
+验证通信延迟存在时，固定间距 + 固定 Tube + 周期 MPC 的控制效果变差。
+```
+
+配置：
+
+```yaml
+follower_lon_mpc:
+  h0: 1.0
+  gamma: 0.0
+  h_min: 1.0
+  h_max: 1.0
+  d0: 5.0
+
+  omega_s0: 0.5
+  omega_v0: 0.2
+  beta_s: 0.0
+  beta_v: 0.0
+  omega_s_min: 0.5
+  omega_s_max: 0.5
+  omega_v_min: 0.2
+  omega_v_max: 0.2
+
+  sigma: -1.0
+  tau_thresh: 999.0
+```
+
+和 V1 参数一样。
+
+区别：
+
+```text
+V1: 不注入或不使用延迟影响。
+V2: 实验场景中加入通信延迟影响。
+```
+
+如果当前源码只是把 tau 用于 DTH/Tube/Trigger，没有真正延迟前车状态，则 V2 和 V1 不会明显拉开。
+
+这种情况下需要后续增加 delayed front_state buffer，才是真正的 Delay Base。
+
+### V3: 加通信延迟 + 三项设计
+
+目的：
+
+```text
+验证 DTH + 自适应 Tube + 事件触发 能改善延迟下的控制效果。
+```
+
+配置：
+
+```yaml
+follower_lon_mpc:
+  h0: 1.0
+  gamma: 3.3
+  h_min: 0.6
+  h_max: 1.5
+  d0: 5.0
+
+  omega_s0: 0.5
+  omega_v0: 0.2
+  beta_s: 3.0
+  beta_v: 1.0
+  omega_s_min: 0.3
+  omega_s_max: 3.0
+  omega_v_min: 0.1
+  omega_v_max: 1.5
+
+  sigma: 0.8
+  tau_thresh: 0.07
+```
+
+含义：
+
+```text
+gamma > 0       -> DTH 动态时距
+beta_s/v > 0    -> Tube 半径随 tau 自适应
+sigma=0.8       -> Tube 越界触发
+tau_thresh=0.07 -> 高延迟触发
+```
+
+## 3. Base 应该包含什么，我的创新是在 Base 上加了什么
+
+Base 应该包含：
+
+```text
+1. 三车 PF 编队拓扑：0 -> 1 -> 2
+2. Leader 纵向 PID 或速度跟踪控制
+3. Follower 纵向 MPC
+4. 固定时距 CTH
+5. 固定 Tube 半径
+6. 周期性 MPC 求解
+7. 车辆加速度、速度、间距物理约束
+8. 同一路径 s 坐标下的 gap 和误差计算
+```
+
+Base 不应该包含：
+
+```text
+1. tau 驱动的动态时距
+2. tau 驱动的 Tube 半径变化
+3. 事件触发求解
+4. 延迟阈值触发
+```
+
+你的创新是在 Base 上增加：
+
+```text
+创新 1：DTH
+固定 h -> h = clip(h0 + gamma * tau, h_min, h_max)
+固定 desired_gap -> desired_gap = h(tau) * v_ego + d0
+
+创新 2：Adaptive Tube
+固定 omega_s / omega_v
+-> omega_s = clip(omega_s0 + beta_s * tau, ...)
+-> omega_v = clip(omega_v0 + beta_v * tau, ...)
+
+创新 3：Event Trigger
+每周期求解 MPC
+-> 当 Tube 偏差超过阈值或 tau 超过阈值时才重新求解
+```
+
+最终论文对比逻辑：
+
+```text
+V1 证明 Base 本身有效。
+V2 证明 Base 在通信延迟下性能下降。
+V3 证明你的三个设计能提升延迟场景下的鲁棒性、安全性或资源效率。
+```
+
+注意：
+
+```text
+如果 V2 要真正体现“通信延迟导致性能变差”，必须让 follower 使用延迟后的 front_state。
+如果只是随机生成 tau，但 front_state 仍是当前前车状态，则 tau 没有真正破坏信息时效性，V2 不一定会比 V1 差。
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# DTE 编队控制 MVP 修改规划  -May11  第一版
 
 目标：在现有 CARLA + ROS2 三车编队骨架上，实现最小可运行版本的三个创新：
 

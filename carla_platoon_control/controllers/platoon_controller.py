@@ -2,6 +2,7 @@
 
 import numpy as np
 import cvxpy as cp
+import time
 from math import sin, cos, atan2, radians
 from .base_controller import LateralController
 from .base_controller import LeaderLonController
@@ -253,6 +254,10 @@ class FollowerLonMPC(FollowerLonController):
         self.u_bar_seq_last = None
         self.x_bar_seq_last = None
         self.trigger_hold_index = 1
+        self.last_solver_status = "not_run"
+        self.last_solver_value = float("nan")
+        self.last_solve_time_ms = 0.0
+        self.last_fallback_used = False
 
         self._setup_mpc()
 
@@ -278,7 +283,11 @@ class FollowerLonMPC(FollowerLonController):
         omega_s, omega_v = self._compute_tube_radius()
 
         # 3. 判断是否触发求解
-        triggered, trigger_error_norm = self._check_trigger(x, omega_s, omega_v)
+        triggered, trigger_error_norm, tube_triggered, delay_triggered = self._check_trigger(
+            x,
+            omega_s,
+            omega_v,
+        )
 
         # 4. 求解MPC或复用上一帧序列
         if triggered:
@@ -313,10 +322,16 @@ class FollowerLonMPC(FollowerLonController):
             "omega_s": omega_s,
             "omega_v": omega_v,
             "triggered": triggered,
+            "tube_triggered": tube_triggered,
+            "delay_triggered": delay_triggered,
             "trigger_error_norm": trigger_error_norm,
             "u_bar": u_bar_used,
             "u_feedback": u_feedback,
             "a_cmd": a_cmd,
+            "solver_status": self.last_solver_status,
+            "solver_value": self.last_solver_value,
+            "solve_time_ms": self.last_solve_time_ms,
+            "fallback_used": self.last_fallback_used,
         }
         return a_cmd, debug_info
 
@@ -359,26 +374,24 @@ class FollowerLonMPC(FollowerLonController):
 
         # 首次运行或无可复用序列
         if self.u_bar_seq_last is None or self.x_bar_seq_last is None:
-            return True, trigger_error_norm
+            return True, trigger_error_norm, False, False
 
         # 上一轮序列已经用完
         if self.trigger_hold_index >= len(self.u_bar_seq_last):
-            return True, trigger_error_norm
-
-        # 通信延迟超过阈值
-        if self.tau > self.tau_thresh:
-            return True, trigger_error_norm
+            return True, trigger_error_norm, False, False
 
         # Tube 归一化偏差超过阈值
         x_bar_ref = self.x_bar_seq_last[self.trigger_hold_index]
         z = x - x_bar_ref
-        trigger_error_norm = np.linalg.norm([
+        trigger_error_norm = float(np.linalg.norm([
             z[0] / omega_s,
             z[1] / omega_v,
-        ])
+        ]))
 
-        triggered = trigger_error_norm > self.sigma
-        return triggered, float(trigger_error_norm)
+        tube_triggered = trigger_error_norm > self.sigma
+        delay_triggered = self.tau > self.tau_thresh
+        triggered = tube_triggered or delay_triggered
+        return triggered, trigger_error_norm, tube_triggered, delay_triggered
 
     def _solve_mpc(self, x0, desired_gap, omega_s, omega_v):
 
@@ -394,15 +407,29 @@ class FollowerLonMPC(FollowerLonController):
         self.omega_v_param.value     = omega_v
 
         # 求解
+        self.last_fallback_used = False
+        t_start = time.perf_counter()
         try:
             self.mpc_problem.solve(solver=cp.OSQP, warm_start=True, verbose=False)
-        except cp.error.SolverError:
+            self.last_solve_time_ms = (time.perf_counter() - t_start) * 1000.0
+            self.last_solver_status = str(self.mpc_problem.status)
+            self.last_solver_value = (
+                float(self.mpc_problem.value)
+                if self.mpc_problem.value is not None
+                else float("nan")
+            )
+        except cp.error.SolverError as exc:
+            self.last_solve_time_ms = (time.perf_counter() - t_start) * 1000.0
+            self.last_solver_status = f"solver_error: {exc}"
+            self.last_solver_value = float("nan")
+            self.last_fallback_used = True
             print("[FollowerLonMPC] 求解异常，保持上一帧")
             return self._fallback_seq(x0)
 
         # 保底
         if self.u_var.value is None or self.x_var.value is None:
-            print("[FollowerLonMPC] 求解失败，保持上一帧")
+            self.last_fallback_used = True
+            print(f"[FollowerLonMPC] 求解失败，status={self.last_solver_status}，保持上一帧")
             return self._fallback_seq(x0)
 
         u_bar_seq = np.array(self.u_var.value).reshape(-1)
@@ -462,7 +489,7 @@ class FollowerLonMPC(FollowerLonController):
 
             # 收紧约束：间距 + 自车速度
             constraints += [gap_bar >= self.gap_min + self.omega_s_param, gap_bar <= self.gap_max - self.omega_s_param]
-            constraints += [v_ego_bar >= self.v_min + self.omega_v_param, v_ego_bar <= self.v_max - self.omega_v_param]
+            constraints += [v_ego_bar >= self.v_min, v_ego_bar <= self.v_max - self.omega_v_param]
 
         # 终端代价
         cost += cp.quad_form(self.x_var[:, self.N], self.Q)
